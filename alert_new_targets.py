@@ -91,88 +91,57 @@ def save_snapshot(path: str, obj: Any) -> None:
 
 def extract_targets_and_rewards(platform: str, data_obj: Any) -> Tuple[Set[str], Set[str]]:
     """
-    Attempts to extract a set of human-readable target identifiers for the platform
-    and a subset that are rewarded. This is heuristic to accommodate schema drift.
+    Extract target URLs/domains from platform data and identify which offer rewards.
     Returns (all_targets, rewarded_targets)
     """
     all_targets: Set[str] = set()
     rewarded: Set[str] = set()
 
-    def mark(name: str, has_reward: bool) -> None:
-        normalized = (name or "").strip()
-        if not normalized:
+    def mark(target: str, has_reward: bool) -> None:
+        if not target or not target.strip():
             return
-        all_targets.add(normalized)
+        target = target.strip()
+        all_targets.add(target)
         if has_reward:
-            rewarded.add(normalized)
+            rewarded.add(target)
 
-    # Common shapes: list[program], each program has in_scope entries
-    # Try a few likely patterns without failing hard.
     try:
-        if isinstance(data_obj, dict) and "programs" in data_obj:
-            programs = data_obj.get("programs", [])
-        else:
-            programs = data_obj if isinstance(data_obj, list) else []
+        programs = data_obj if isinstance(data_obj, list) else []
 
         for program in programs:
-            # program-level hints
-            program_reward = bool(
-                program.get("offers_bounties")
-                or program.get("offers_rewards")
-                or program.get("bounty")
-                or program.get("has_bounty")
-            ) if isinstance(program, dict) else False
+            if not isinstance(program, dict):
+                continue
 
-            # program name fallback
-            program_name = None
-            if isinstance(program, dict):
-                program_name = (
-                    program.get("name")
-                    or program.get("handle")
-                    or program.get("slug")
-                )
+            # Program-level bounty info
+            program_offers_bounty = bool(program.get("offers_bounties", False))
+            program_name = program.get("name") or program.get("handle", "Unknown")
 
-            # in-scope targets containers
-            scopes = []
-            if isinstance(program, dict):
-                for key in ("targets", "in_scope", "inscope", "assets"):
-                    if key in program and isinstance(program[key], list):
-                        scopes.extend(program[key])
+            # Extract targets from in_scope
+            targets_data = program.get("targets", {})
+            in_scope = targets_data.get("in_scope", []) if isinstance(targets_data, dict) else []
 
-            if scopes:
-                for asset in scopes:
-                    if not isinstance(asset, dict):
-                        continue
-                    # Extract a reasonable display name
-                    name = (
-                        asset.get("asset_identifier")
-                        or asset.get("asset")
-                        or asset.get("url")
-                        or asset.get("domain")
-                        or asset.get("name")
-                    )
-                    # Determine reward at asset level or fallback to program
-                    asset_reward = bool(
-                        asset.get("eligible_for_bounty")
-                        or asset.get("eligible_for_rewards")
-                        or asset.get("bounty")
-                        or asset.get("reward")
-                    )
-                    has_reward = asset_reward or program_reward
+            for asset in in_scope:
+                if not isinstance(asset, dict):
+                    continue
 
-                    # Include program context when possible for readability
-                    display = name
-                    if program_name and name and program_name not in str(name):
-                        display = f"{program_name} - {name}"
-                    mark(str(display), has_reward)
-            else:
-                # If no scopes found, at least record the program itself
-                if program_name:
-                    mark(str(program_name), program_reward)
+                # Get the actual target URL/domain
+                target = asset.get("asset_identifier", "").strip()
+                if not target:
+                    continue
 
-    except Exception:
-        # On any unexpected schema, do not fail the run
-        pass
+                # Check if this specific target offers bounty
+                target_eligible = asset.get("eligible_for_bounty", False)
+                has_reward = target_eligible or (not target_eligible and program_offers_bounty)
+
+                # Format: "Program Name (type) - target_url"
+                asset_type = asset.get("asset_type", "other").lower()
+                display_target = f"{program_name} ({asset_type}) - {target}"
+                
+                mark(display_target, has_reward)
+
+    except Exception as e:
+        # Log but don't fail the entire run
+        print(f"Warning: Error extracting targets from {platform}: {e}")
 
     return all_targets, rewarded
 
@@ -226,7 +195,11 @@ def main() -> int:
     # Load settings
     settings = read_settings_yaml(CONFIG_PATH)
     timeout = int(settings.get("request_timeout_seconds", "15") or 15)
-    slack_webhook = settings.get("slack_webhook_url", "")
+    slack_webhook = (
+        settings.get("slack_webhook_url")
+        or settings.get("slack_webhook")
+        or ""
+    )
 
     # Fetch current data and compare to snapshots
     any_changes = False
